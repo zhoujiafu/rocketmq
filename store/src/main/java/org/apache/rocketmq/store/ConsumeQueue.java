@@ -19,9 +19,14 @@ package org.apache.rocketmq.store;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Map;
+
+import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.store.config.BrokerRole;
 import org.apache.rocketmq.store.config.StorePathConfigHelper;
 
 public class ConsumeQueue {
@@ -132,7 +137,7 @@ public class ConsumeQueue {
                         log.info("recover next consume queue file, " + mappedFile.getFileName());
                     }
                 } else {
-                    log.info("recover current consume queue queue over " + mappedFile.getFileName() + " "
+                    log.info("recover current consume queue over " + mappedFile.getFileName() + " "
                         + (processOffset + mappedFileOffset));
                     break;
                 }
@@ -220,11 +225,11 @@ public class ConsumeQueue {
         return 0;
     }
 
-    public void truncateDirtyLogicFiles(long phyOffet) {
+    public void truncateDirtyLogicFiles(long phyOffset) {
 
         int logicFileSize = this.mappedFileSize;
 
-        this.maxPhysicOffset = phyOffet;
+        this.maxPhysicOffset = phyOffset;
         long maxExtAddr = 1;
         while (true) {
             MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile();
@@ -241,7 +246,7 @@ public class ConsumeQueue {
                     long tagsCode = byteBuffer.getLong();
 
                     if (0 == i) {
-                        if (offset >= phyOffet) {
+                        if (offset >= phyOffset) {
                             this.mappedFileQueue.deleteLastMappedFile();
                             break;
                         } else {
@@ -259,7 +264,7 @@ public class ConsumeQueue {
 
                         if (offset >= 0 && size > 0) {
 
-                            if (offset >= phyOffet) {
+                            if (offset >= phyOffset) {
                                 return;
                             }
 
@@ -340,29 +345,30 @@ public class ConsumeQueue {
         long minExtAddr = 1;
         if (mappedFile != null) {
             SelectMappedBufferResult result = mappedFile.selectMappedBuffer(0);
-            if (result != null) {
-                try {
-                    for (int i = 0; i < result.getSize(); i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
-                        long offsetPy = result.getByteBuffer().getLong();
-                        result.getByteBuffer().getInt();
-                        long tagsCode = result.getByteBuffer().getLong();
+            if (result == null) {
+                return;
+            }
+            try {
+                for (int i = 0; i < result.getSize(); i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
+                    long offsetPy = result.getByteBuffer().getLong();
+                    result.getByteBuffer().getInt();
+                    long tagsCode = result.getByteBuffer().getLong();
 
-                        if (offsetPy >= phyMinOffset) {
-                            this.minLogicOffset = mappedFile.getFileFromOffset() + i;
-                            log.info("Compute logical min offset: {}, topic: {}, queueId: {}",
-                                this.getMinOffsetInQueue(), this.topic, this.queueId);
-                            // This maybe not take effect, when not every consume queue has extend file.
-                            if (isExtAddr(tagsCode)) {
-                                minExtAddr = tagsCode;
-                            }
-                            break;
+                    if (offsetPy >= phyMinOffset) {
+                        this.minLogicOffset = mappedFile.getFileFromOffset() + i;
+                        log.info("Compute logical min offset: {}, topic: {}, queueId: {}",
+                            this.getMinOffsetInQueue(), this.topic, this.queueId);
+                        // This maybe not take effect, when not every consume queue has extend file.
+                        if (isExtAddr(tagsCode)) {
+                            minExtAddr = tagsCode;
                         }
+                        break;
                     }
-                } catch (Exception e) {
-                    log.error("Exception thrown when correctMinOffset", e);
-                } finally {
-                    result.release();
                 }
+            } catch (Exception e) {
+                log.error("Exception thrown when correctMinOffset", e);
+            } finally {
+                result.release();
             }
         }
 
@@ -375,7 +381,7 @@ public class ConsumeQueue {
         return this.minLogicOffset / CQ_STORE_UNIT_SIZE;
     }
 
-    public void putMessagePositionInfoWrapper(DispatchRequest request) {
+    public void putMessagePositionInfoWrapper(DispatchRequest request, boolean multiQueue) {
         final int maxRetries = 30;
         boolean canWrite = this.defaultMessageStore.getRunningFlags().isCQWriteable();
         for (int i = 0; i < maxRetries && canWrite; i++) {
@@ -397,7 +403,14 @@ public class ConsumeQueue {
             boolean result = this.putMessagePositionInfo(request.getCommitLogOffset(),
                 request.getMsgSize(), tagsCode, request.getConsumeQueueOffset());
             if (result) {
+                if (this.defaultMessageStore.getMessageStoreConfig().getBrokerRole() == BrokerRole.SLAVE ||
+                    this.defaultMessageStore.getMessageStoreConfig().isEnableDLegerCommitLog()) {
+                    this.defaultMessageStore.getStoreCheckpoint().setPhysicMsgTimestamp(request.getStoreTimestamp());
+                }
                 this.defaultMessageStore.getStoreCheckpoint().setLogicsMsgTimestamp(request.getStoreTimestamp());
+                if (multiQueue) {
+                    multiDispatchLmqQueue(request, maxRetries);
+                }
                 return;
             } else {
                 // XXX: warn and notify me
@@ -415,6 +428,51 @@ public class ConsumeQueue {
         // XXX: warn and notify me
         log.error("[BUG]consume queue can not write, {} {}", this.topic, this.queueId);
         this.defaultMessageStore.getRunningFlags().makeLogicsQueueError();
+    }
+
+    private void multiDispatchLmqQueue(DispatchRequest request, int maxRetries) {
+        Map<String, String> prop = request.getPropertiesMap();
+        String multiDispatchQueue = prop.get(MessageConst.PROPERTY_INNER_MULTI_DISPATCH);
+        String multiQueueOffset = prop.get(MessageConst.PROPERTY_INNER_MULTI_QUEUE_OFFSET);
+        String[] queues = multiDispatchQueue.split(MixAll.MULTI_DISPATCH_QUEUE_SPLITTER);
+        String[] queueOffsets = multiQueueOffset.split(MixAll.MULTI_DISPATCH_QUEUE_SPLITTER);
+        if (queues.length != queueOffsets.length) {
+            log.error("[bug] queues.length!=queueOffsets.length ", request.getTopic());
+            return;
+        }
+        for (int i = 0; i < queues.length; i++) {
+            String queueName = queues[i];
+            long queueOffset = Long.parseLong(queueOffsets[i]);
+            int queueId = request.getQueueId();
+            if (this.defaultMessageStore.getMessageStoreConfig().isEnableLmq() && MixAll.isLmq(queueName)) {
+                queueId = 0;
+            }
+            doDispatchLmqQueue(request, maxRetries, queueName, queueOffset, queueId);
+
+        }
+    }
+
+    private void doDispatchLmqQueue(DispatchRequest request, int maxRetries, String queueName, long queueOffset,
+        int queueId) {
+        ConsumeQueue cq = this.defaultMessageStore.findConsumeQueue(queueName, queueId);
+        boolean canWrite = this.defaultMessageStore.getRunningFlags().isCQWriteable();
+        for (int i = 0; i < maxRetries && canWrite; i++) {
+            boolean result = cq.putMessagePositionInfo(request.getCommitLogOffset(), request.getMsgSize(),
+                request.getTagsCode(),
+                queueOffset);
+            if (result) {
+                break;
+            } else {
+                log.warn("[BUG]put commit log position info to " + queueName + ":" + queueId + " " + request.getCommitLogOffset()
+                    + " failed, retry " + i + " times");
+
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    log.warn("", e);
+                }
+            }
+        }
     }
 
     private boolean putMessagePositionInfo(final long offset, final int size, final long tagsCode,
@@ -489,8 +547,7 @@ public class ConsumeQueue {
         if (offset >= this.getMinLogicOffset()) {
             MappedFile mappedFile = this.mappedFileQueue.findMappedFileByOffset(offset);
             if (mappedFile != null) {
-                SelectMappedBufferResult result = mappedFile.selectMappedBuffer((int) (offset % mappedFileSize));
-                return result;
+                return mappedFile.selectMappedBuffer((int) (offset % mappedFileSize));
             }
         }
         return null;
@@ -579,4 +636,5 @@ public class ConsumeQueue {
     public boolean isExtAddr(long tagsCode) {
         return ConsumeQueueExt.isExtAddr(tagsCode);
     }
+
 }

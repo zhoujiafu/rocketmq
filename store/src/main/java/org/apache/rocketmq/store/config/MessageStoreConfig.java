@@ -17,23 +17,31 @@
 package org.apache.rocketmq.store.config;
 
 import java.io.File;
+
 import org.apache.rocketmq.common.annotation.ImportantField;
 import org.apache.rocketmq.store.ConsumeQueue;
 
 public class MessageStoreConfig {
+
+    public static final String MULTI_PATH_SPLITTER = System.getProperty("rocketmq.broker.multiPathSplitter", ",");
+
     //The root directory in which the log data is kept
     @ImportantField
     private String storePathRootDir = System.getProperty("user.home") + File.separator + "store";
 
     //The directory in which the commitlog is kept
     @ImportantField
-    private String storePathCommitLog = System.getProperty("user.home") + File.separator + "store"
-        + File.separator + "commitlog";
+    private String storePathCommitLog = null;
+
+    @ImportantField
+    private String storePathDLedgerCommitLog = null;
+
+    private String readOnlyCommitLogStorePaths = null;
 
     // CommitLog file size,default is 1G
-    private int mapedFileSizeCommitLog = 1024 * 1024 * 1024;
+    private int mappedFileSizeCommitLog = 1024 * 1024 * 1024;
     // ConsumeQueue file size,default is 30W
-    private int mapedFileSizeConsumeQueue = 300000 * ConsumeQueue.CQ_STORE_UNIT_SIZE;
+    private int mappedFileSizeConsumeQueue = 300000 * ConsumeQueue.CQ_STORE_UNIT_SIZE;
     // enable consume queue ext
     private boolean enableConsumeQueueExt = false;
     // ConsumeQueue extend file size, 48M
@@ -54,13 +62,12 @@ public class MessageStoreConfig {
 
     /**
      * introduced since 4.0.x. Determine whether to use mutex reentrantLock when putting message.<br/>
-     * By default it is set to false indicating using spin lock when putting message.
      */
-    private boolean useReentrantLockWhenPutMessage = false;
+    private boolean useReentrantLockWhenPutMessage = true;
 
-    // Whether schedule flush,default is real-time
+    // Whether schedule flush
     @ImportantField
-    private boolean flushCommitLogTimed = false;
+    private boolean flushCommitLogTimed = true;
     // ConsumeQueue flush interval
     private int flushIntervalConsumeQueue = 1000;
     // Resource reclaim interval
@@ -80,7 +87,7 @@ public class MessageStoreConfig {
     private int fileReservedTime = 72;
     // Flow control for ConsumeQueue
     private int putMsgIndexHightWater = 600000;
-    // The maximum size of a single log file,default is 512K
+    // The maximum size of message body,default is 4M,4M only for body length,not include others.
     private int maxMessageSize = 1024 * 1024 * 4;
     // Whether check the CRC32 of the records consumed.
     // This ensures no on-the-wire or on-disk corruption to the messages occurred.
@@ -126,6 +133,7 @@ public class MessageStoreConfig {
     @ImportantField
     private FlushDiskType flushDiskType = FlushDiskType.ASYNC_FLUSH;
     private int syncFlushTimeout = 1000 * 5;
+    private int slaveTimeout = 3000;
     private String messageDelayLevel = "1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h";
     private long flushDelayOffsetInterval = 1000 * 10;
     @ImportantField
@@ -147,6 +155,20 @@ public class MessageStoreConfig {
     private String dLegerGroup;
     private String dLegerPeers;
     private String dLegerSelfId;
+
+    private String preferredLeaderId;
+
+    private boolean isEnableBatchPush = false;
+
+    private boolean enableScheduleMessageStats = true;
+
+    private boolean enableLmq = false;
+    private boolean enableMultiDispatch = false;
+    private int maxLmqConsumeQueueNum = 20000;
+
+    private boolean enableScheduleAsyncDeliver = false;
+    private int scheduleAsyncDeliverMaxPendingLimit = 2000;
+    private int scheduleAsyncDeliverMaxResendNum2Blocked = 3;
 
     public boolean isDebugLockEnable() {
         return debugLockEnable;
@@ -188,22 +210,22 @@ public class MessageStoreConfig {
         this.warmMapedFileEnable = warmMapedFileEnable;
     }
 
-    public int getMapedFileSizeCommitLog() {
-        return mapedFileSizeCommitLog;
+    public int getMappedFileSizeCommitLog() {
+        return mappedFileSizeCommitLog;
     }
 
-    public void setMapedFileSizeCommitLog(int mapedFileSizeCommitLog) {
-        this.mapedFileSizeCommitLog = mapedFileSizeCommitLog;
+    public void setMappedFileSizeCommitLog(int mappedFileSizeCommitLog) {
+        this.mappedFileSizeCommitLog = mappedFileSizeCommitLog;
     }
 
-    public int getMapedFileSizeConsumeQueue() {
+    public int getMappedFileSizeConsumeQueue() {
 
-        int factor = (int) Math.ceil(this.mapedFileSizeConsumeQueue / (ConsumeQueue.CQ_STORE_UNIT_SIZE * 1.0));
+        int factor = (int) Math.ceil(this.mappedFileSizeConsumeQueue / (ConsumeQueue.CQ_STORE_UNIT_SIZE * 1.0));
         return (int) (factor * ConsumeQueue.CQ_STORE_UNIT_SIZE);
     }
 
-    public void setMapedFileSizeConsumeQueue(int mapedFileSizeConsumeQueue) {
-        this.mapedFileSizeConsumeQueue = mapedFileSizeConsumeQueue;
+    public void setMappedFileSizeConsumeQueue(int mappedFileSizeConsumeQueue) {
+        this.mappedFileSizeConsumeQueue = mappedFileSizeConsumeQueue;
     }
 
     public boolean isEnableConsumeQueueExt() {
@@ -283,11 +305,22 @@ public class MessageStoreConfig {
     }
 
     public String getStorePathCommitLog() {
+        if (storePathCommitLog == null) {
+            return storePathRootDir + File.separator + "commitlog";
+        }
         return storePathCommitLog;
     }
 
     public void setStorePathCommitLog(String storePathCommitLog) {
         this.storePathCommitLog = storePathCommitLog;
+    }
+
+    public String getStorePathDLedgerCommitLog() {
+        return storePathDLedgerCommitLog;
+    }
+
+    public void setStorePathDLedgerCommitLog(String storePathDLedgerCommitLog) {
+        this.storePathDLedgerCommitLog = storePathDLedgerCommitLog;
     }
 
     public String getDeleteWhen() {
@@ -528,6 +561,14 @@ public class MessageStoreConfig {
         this.syncFlushTimeout = syncFlushTimeout;
     }
 
+    public int getSlaveTimeout() {
+        return slaveTimeout;
+    }
+
+    public void setSlaveTimeout(int slaveTimeout) {
+        this.slaveTimeout = slaveTimeout;
+    }
+
     public String getHaMasterAddress() {
         return haMasterAddress;
     }
@@ -671,6 +712,13 @@ public class MessageStoreConfig {
         this.commitCommitLogThoroughInterval = commitCommitLogThoroughInterval;
     }
 
+    public String getReadOnlyCommitLogStorePaths() {
+        return readOnlyCommitLogStorePaths;
+    }
+
+    public void setReadOnlyCommitLogStorePaths(String readOnlyCommitLogStorePaths) {
+        this.readOnlyCommitLogStorePaths = readOnlyCommitLogStorePaths;
+    }
     public String getdLegerGroup() {
         return dLegerGroup;
     }
@@ -701,5 +749,77 @@ public class MessageStoreConfig {
 
     public void setEnableDLegerCommitLog(boolean enableDLegerCommitLog) {
         this.enableDLegerCommitLog = enableDLegerCommitLog;
+    }
+
+    public String getPreferredLeaderId() {
+        return preferredLeaderId;
+    }
+
+    public void setPreferredLeaderId(String preferredLeaderId) {
+        this.preferredLeaderId = preferredLeaderId;
+    }
+
+    public boolean isEnableBatchPush() {
+        return isEnableBatchPush;
+    }
+
+    public void setEnableBatchPush(boolean enableBatchPush) {
+        isEnableBatchPush = enableBatchPush;
+    }
+
+    public boolean isEnableScheduleMessageStats() {
+        return enableScheduleMessageStats;
+    }
+
+    public void setEnableScheduleMessageStats(boolean enableScheduleMessageStats) {
+        this.enableScheduleMessageStats = enableScheduleMessageStats;
+    }
+
+    public boolean isEnableLmq() {
+        return enableLmq;
+    }
+
+    public void setEnableLmq(boolean enableLmq) {
+        this.enableLmq = enableLmq;
+    }
+
+    public boolean isEnableMultiDispatch() {
+        return enableMultiDispatch;
+    }
+
+    public void setEnableMultiDispatch(boolean enableMultiDispatch) {
+        this.enableMultiDispatch = enableMultiDispatch;
+    }
+
+    public int getMaxLmqConsumeQueueNum() {
+        return maxLmqConsumeQueueNum;
+    }
+
+    public void setMaxLmqConsumeQueueNum(int maxLmqConsumeQueueNum) {
+        this.maxLmqConsumeQueueNum = maxLmqConsumeQueueNum;
+    }
+
+    public boolean isEnableScheduleAsyncDeliver() {
+        return enableScheduleAsyncDeliver;
+    }
+
+    public void setEnableScheduleAsyncDeliver(boolean enableScheduleAsyncDeliver) {
+        this.enableScheduleAsyncDeliver = enableScheduleAsyncDeliver;
+    }
+
+    public int getScheduleAsyncDeliverMaxPendingLimit() {
+        return scheduleAsyncDeliverMaxPendingLimit;
+    }
+
+    public void setScheduleAsyncDeliverMaxPendingLimit(int scheduleAsyncDeliverMaxPendingLimit) {
+        this.scheduleAsyncDeliverMaxPendingLimit = scheduleAsyncDeliverMaxPendingLimit;
+    }
+
+    public int getScheduleAsyncDeliverMaxResendNum2Blocked() {
+        return scheduleAsyncDeliverMaxResendNum2Blocked;
+    }
+
+    public void setScheduleAsyncDeliverMaxResendNum2Blocked(int scheduleAsyncDeliverMaxResendNum2Blocked) {
+        this.scheduleAsyncDeliverMaxResendNum2Blocked = scheduleAsyncDeliverMaxResendNum2Blocked;
     }
 }

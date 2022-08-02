@@ -27,6 +27,7 @@ import java.nio.ByteBuffer;
 import java.util.Map;
 import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.UtilAll;
+import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
@@ -83,11 +84,34 @@ public class ConsumeQueueTest {
         return msg;
     }
 
+    public MessageExtBrokerInner buildIPv6HostMessage() {
+        MessageExtBrokerInner msg = new MessageExtBrokerInner();
+        msg.setTopic(topic);
+        msg.setTags("TAG1");
+        msg.setKeys("Hello");
+        msg.setBody(msgBody);
+        msg.setMsgId("24084004018081003FAA1DDE2B3F898A00002A9F0000000000000CA0");
+        msg.setKeys(String.valueOf(System.currentTimeMillis()));
+        msg.setQueueId(queueId);
+        msg.setSysFlag(0);
+        msg.setBornHostV6Flag();
+        msg.setStoreHostAddressV6Flag();
+        msg.setBornTimestamp(System.currentTimeMillis());
+        msg.setBornHost(new InetSocketAddress("1050:0000:0000:0000:0005:0600:300c:326b", 123));
+        msg.setStoreHost(new InetSocketAddress("::1", 124));
+        for (int i = 0; i < 1; i++) {
+            msg.putUserProperty(String.valueOf(i), "imagoodperson" + i);
+        }
+        msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
+
+        return msg;
+    }
+
     public MessageStoreConfig buildStoreConfig(int commitLogFileSize, int cqFileSize,
         boolean enableCqExt, int cqExtFileSize) {
         MessageStoreConfig messageStoreConfig = new MessageStoreConfig();
-        messageStoreConfig.setMapedFileSizeCommitLog(commitLogFileSize);
-        messageStoreConfig.setMapedFileSizeConsumeQueue(cqFileSize);
+        messageStoreConfig.setMappedFileSizeCommitLog(commitLogFileSize);
+        messageStoreConfig.setMappedFileSizeConsumeQueue(cqFileSize);
         messageStoreConfig.setMappedFileSizeConsumeQueueExt(cqExtFileSize);
         messageStoreConfig.setMessageIndexEnable(false);
         messageStoreConfig.setEnableConsumeQueueExt(enableCqExt);
@@ -107,7 +131,35 @@ public class ConsumeQueueTest {
 
         DefaultMessageStore master = new DefaultMessageStore(
             messageStoreConfig,
-            new BrokerStatsManager(brokerConfig.getBrokerClusterName()),
+            new BrokerStatsManager(brokerConfig.getBrokerClusterName(), brokerConfig.isEnableDetailStat()),
+            new MessageArrivingListener() {
+                @Override
+                public void arriving(String topic, int queueId, long logicOffset, long tagsCode,
+                    long msgStoreTime, byte[] filterBitMap, Map<String, String> properties) {
+                }
+            }
+            , brokerConfig);
+
+        assertThat(master.load()).isTrue();
+
+        master.start();
+
+        return master;
+    }
+
+    protected DefaultMessageStore genForMultiQueue() throws Exception {
+        MessageStoreConfig messageStoreConfig = buildStoreConfig(
+            commitLogFileSize, cqFileSize, true, cqExtFileSize
+        );
+
+        messageStoreConfig.setEnableLmq(true);
+        messageStoreConfig.setEnableMultiDispatch(true);
+
+        BrokerConfig brokerConfig = new BrokerConfig();
+
+        DefaultMessageStore master = new DefaultMessageStore(
+            messageStoreConfig,
+            new BrokerStatsManager(brokerConfig.getBrokerClusterName(), brokerConfig.isEnableDetailStat()),
             new MessageArrivingListener() {
                 @Override
                 public void arriving(String topic, int queueId, long logicOffset, long tagsCode,
@@ -127,8 +179,39 @@ public class ConsumeQueueTest {
         long totalMsgs = 200;
 
         for (long i = 0; i < totalMsgs; i++) {
-            master.putMessage(buildMessage());
+            if (i < totalMsgs / 2) {
+                master.putMessage(buildMessage());
+            } else {
+                master.putMessage(buildIPv6HostMessage());
+            }
         }
+    }
+
+    protected void putMsgMultiQueue(DefaultMessageStore master) throws Exception {
+        for (long i = 0; i < 1; i++) {
+            master.putMessage(buildMessageMultiQueue());
+        }
+    }
+
+    private MessageExtBrokerInner buildMessageMultiQueue() {
+        MessageExtBrokerInner msg = new MessageExtBrokerInner();
+        msg.setTopic(topic);
+        msg.setTags("TAG1");
+        msg.setKeys("Hello");
+        msg.setBody(msgBody);
+        msg.setKeys(String.valueOf(System.currentTimeMillis()));
+        msg.setQueueId(queueId);
+        msg.setSysFlag(0);
+        msg.setBornTimestamp(System.currentTimeMillis());
+        msg.setStoreHost(StoreHost);
+        msg.setBornHost(BornHost);
+        for (int i = 0; i < 1; i++) {
+            msg.putUserProperty(MessageConst.PROPERTY_INNER_MULTI_DISPATCH, "%LMQ%123,%LMQ%456");
+            msg.putUserProperty(String.valueOf(i), "imagoodperson" + i);
+        }
+        msg.setPropertiesString(MessageDecoder.messageProperties2String(msg.getProperties()));
+
+        return msg;
     }
 
     protected void deleteDirectory(String rootPath) {
@@ -188,6 +271,89 @@ public class ConsumeQueueTest {
             deleteDirectory(storePath);
         }
 
+    }
+
+    @Test
+    public void testPutMessagePositionInfoWrapper_MultiQueue() throws Exception {
+        DefaultMessageStore messageStore = null;
+        try {
+            messageStore = genForMultiQueue();
+
+
+            int totalMessages = 10;
+
+            for (int i = 0; i < totalMessages; i++) {
+                putMsgMultiQueue(messageStore);
+            }
+            Thread.sleep(5);
+
+            ConsumeQueue cq = messageStore.getConsumeQueueTable().get(topic).get(queueId);
+            Method method = cq.getClass().getDeclaredMethod("putMessagePositionInfoWrapper", DispatchRequest.class, boolean.class);
+
+            assertThat(method).isNotNull();
+
+            method.setAccessible(true);
+
+            SelectMappedBufferResult result = messageStore.getCommitLog().getData(0);
+            assertThat(result != null).isTrue();
+
+            DispatchRequest dispatchRequest = messageStore.getCommitLog().checkMessageAndReturnSize(result.getByteBuffer(), false, false);
+
+            assertThat(cq).isNotNull();
+
+            Object dispatchResult = method.invoke(cq,  dispatchRequest, true);
+
+            ConsumeQueue lmqCq1 = messageStore.getConsumeQueueTable().get("%LMQ%123").get(0);
+
+            ConsumeQueue lmqCq2 = messageStore.getConsumeQueueTable().get("%LMQ%456").get(0);
+
+            assertThat(lmqCq1).isNotNull();
+
+            assertThat(lmqCq2).isNotNull();
+
+        } finally {
+            if (messageStore != null) {
+                messageStore.shutdown();
+                messageStore.destroy();
+            }
+            deleteDirectory(storePath);
+        }
+
+    }
+
+    @Test
+    public void testPutMessagePositionInfoMultiQueue() throws Exception {
+        DefaultMessageStore messageStore = null;
+        try {
+
+            messageStore = genForMultiQueue();
+
+            int totalMessages = 10;
+
+            for (int i = 0; i < totalMessages; i++) {
+                putMsgMultiQueue(messageStore);
+            }
+            Thread.sleep(5);
+
+            ConsumeQueue cq = messageStore.getConsumeQueueTable().get(topic).get(queueId);
+
+            ConsumeQueue lmqCq1 = messageStore.getConsumeQueueTable().get("%LMQ%123").get(0);
+
+            ConsumeQueue lmqCq2 = messageStore.getConsumeQueueTable().get("%LMQ%456").get(0);
+
+            assertThat(cq).isNotNull();
+
+            assertThat(lmqCq1).isNotNull();
+
+            assertThat(lmqCq2).isNotNull();
+
+        } finally {
+            if (messageStore != null) {
+                messageStore.shutdown();
+                messageStore.destroy();
+            }
+            deleteDirectory(storePath);
+        }
     }
 
     @Test

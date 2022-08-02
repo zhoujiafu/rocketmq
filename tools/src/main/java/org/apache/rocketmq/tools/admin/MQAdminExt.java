@@ -24,6 +24,8 @@ import java.util.Set;
 import org.apache.rocketmq.client.MQAdmin;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.common.AclConfig;
+import org.apache.rocketmq.common.PlainAccessConfig;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.admin.ConsumeStats;
 import org.apache.rocketmq.common.admin.RollbackStats;
@@ -31,6 +33,7 @@ import org.apache.rocketmq.common.admin.TopicStatsTable;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.common.protocol.body.BrokerStatsData;
+import org.apache.rocketmq.common.protocol.body.ClusterAclVersionInfo;
 import org.apache.rocketmq.common.protocol.body.ClusterInfo;
 import org.apache.rocketmq.common.protocol.body.ConsumeMessageDirectlyResult;
 import org.apache.rocketmq.common.protocol.body.ConsumeStatsList;
@@ -39,6 +42,7 @@ import org.apache.rocketmq.common.protocol.body.ConsumerRunningInfo;
 import org.apache.rocketmq.common.protocol.body.GroupList;
 import org.apache.rocketmq.common.protocol.body.KVTable;
 import org.apache.rocketmq.common.protocol.body.ProducerConnection;
+import org.apache.rocketmq.common.protocol.body.ProducerTableInfo;
 import org.apache.rocketmq.common.protocol.body.QueryConsumeQueueResponseBody;
 import org.apache.rocketmq.common.protocol.body.QueueTimeSpan;
 import org.apache.rocketmq.common.protocol.body.SubscriptionGroupWrapper;
@@ -68,13 +72,31 @@ public interface MQAdminExt extends MQAdmin {
         final TopicConfig config) throws RemotingException, MQBrokerException,
         InterruptedException, MQClientException;
 
+    void createAndUpdatePlainAccessConfig(final String addr, final PlainAccessConfig plainAccessConfig) throws RemotingException, MQBrokerException,
+        InterruptedException, MQClientException;
+
+    void deletePlainAccessConfig(final String addr, final String accessKey) throws RemotingException, MQBrokerException,
+        InterruptedException, MQClientException;
+
+    void updateGlobalWhiteAddrConfig(final String addr, final String globalWhiteAddrs)throws RemotingException, MQBrokerException,
+        InterruptedException, MQClientException;
+
+    void updateGlobalWhiteAddrConfig(final String addr, final String globalWhiteAddrs, String aclFileFullPath)throws RemotingException, MQBrokerException,
+        InterruptedException, MQClientException;
+
+    ClusterAclVersionInfo examineBrokerClusterAclVersionInfo(final String addr) throws RemotingException, MQBrokerException,
+        InterruptedException, MQClientException;
+
+    AclConfig examineBrokerClusterAclConfig(final String addr) throws RemotingException, MQBrokerException,
+        InterruptedException, MQClientException;
+
     void createAndUpdateSubscriptionGroupConfig(final String addr,
         final SubscriptionGroupConfig config) throws RemotingException,
         MQBrokerException, InterruptedException, MQClientException;
 
-    SubscriptionGroupConfig examineSubscriptionGroupConfig(final String addr, final String group);
+    SubscriptionGroupConfig examineSubscriptionGroupConfig(final String addr, final String group) throws InterruptedException, RemotingException, MQClientException, MQBrokerException;
 
-    TopicConfig examineTopicConfig(final String addr, final String topic);
+    TopicConfig examineTopicConfig(final String addr, final String topic) throws RemotingException, InterruptedException, MQBrokerException;
 
     TopicStatsTable examineTopicStats(
         final String topic) throws RemotingException, MQClientException, InterruptedException,
@@ -107,14 +129,24 @@ public interface MQAdminExt extends MQAdmin {
         RemotingSendRequestException, RemotingTimeoutException, InterruptedException, MQBrokerException, RemotingException,
         MQClientException;
 
+    ConsumerConnection examineConsumerConnectionInfo(
+        String consumerGroup, String brokerAddr) throws InterruptedException, MQBrokerException,
+        RemotingException, MQClientException;
+
     ProducerConnection examineProducerConnectionInfo(final String producerGroup,
         final String topic) throws RemotingException,
         MQClientException, InterruptedException, MQBrokerException;
+
+    ProducerTableInfo getAllProducerInfo(final String brokerAddr) throws RemotingException,
+            MQClientException, InterruptedException, MQBrokerException;
 
     List<String> getNameServerAddressList();
 
     int wipeWritePermOfBroker(final String namesrvAddr, String brokerName) throws RemotingCommandException,
         RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException, InterruptedException, MQClientException;
+
+    int addWritePermOfBroker(final String namesrvAddr, String brokerName) throws RemotingCommandException,
+            RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException, InterruptedException, MQClientException;
 
     void putKVConfig(final String namespace, final String key, final String value);
 
@@ -127,11 +159,13 @@ public interface MQAdminExt extends MQAdmin {
     void deleteTopicInBroker(final Set<String> addrs, final String topic) throws RemotingException, MQBrokerException,
         InterruptedException, MQClientException;
 
-    void deleteTopicInNameServer(final Set<String> addrs,
-        final String topic) throws RemotingException, MQBrokerException,
+    void deleteTopicInNameServer(final Set<String> addrs, final String topic, String clusterName) throws RemotingException, MQBrokerException,
         InterruptedException, MQClientException;
 
     void deleteSubscriptionGroup(final String addr, String groupName) throws RemotingException, MQBrokerException,
+        InterruptedException, MQClientException;
+
+    void deleteSubscriptionGroup(final String addr, String groupName, boolean removeOffset) throws RemotingException, MQBrokerException,
         InterruptedException, MQClientException;
 
     void createAndUpdateKvConfig(String namespace, String key,
@@ -169,6 +203,12 @@ public interface MQAdminExt extends MQAdmin {
         RemotingTimeoutException, MQClientException, InterruptedException;
 
     boolean cleanExpiredConsumerQueueByAddr(String addr) throws RemotingConnectException, RemotingSendRequestException,
+        RemotingTimeoutException, MQClientException, InterruptedException;
+
+    boolean deleteExpiredCommitLog(String cluster) throws RemotingConnectException, RemotingSendRequestException,
+        RemotingTimeoutException, MQClientException, InterruptedException;
+
+    boolean deleteExpiredCommitLogByAddr(String addr) throws RemotingConnectException, RemotingSendRequestException,
         RemotingTimeoutException, MQClientException, InterruptedException;
 
     boolean cleanUnusedTopic(String cluster) throws RemotingConnectException, RemotingSendRequestException,
@@ -214,9 +254,17 @@ public interface MQAdminExt extends MQAdmin {
         long timeoutMillis) throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
         RemotingConnectException, MQBrokerException;
 
-    TopicConfigSerializeWrapper getAllTopicGroup(final String brokerAddr,
+    SubscriptionGroupWrapper getUserSubscriptionGroup(final String brokerAddr,
         long timeoutMillis) throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
         RemotingConnectException, MQBrokerException;
+
+    TopicConfigSerializeWrapper getAllTopicConfig(final String brokerAddr,
+        long timeoutMillis) throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException,
+        RemotingConnectException, MQBrokerException;
+
+    TopicConfigSerializeWrapper getUserTopicConfig(final String brokerAddr, final boolean specialTopic,
+        long timeoutMillis) throws InterruptedException, RemotingException,
+        MQBrokerException, MQClientException;
 
     void updateConsumeOffset(String brokerAddr, String consumeGroup, MessageQueue mq,
         long offset) throws RemotingException, InterruptedException, MQBrokerException;
@@ -259,4 +307,9 @@ public interface MQAdminExt extends MQAdmin {
         final String topic, final int queueId,
         final long index, final int count, final String consumerGroup)
         throws InterruptedException, RemotingTimeoutException, RemotingSendRequestException, RemotingConnectException, MQClientException;
+
+    boolean resumeCheckHalfMessage(String msgId)
+            throws RemotingException, MQClientException, InterruptedException, MQBrokerException;
+
+    boolean resumeCheckHalfMessage(final String topic, final String msgId) throws RemotingException, MQClientException, InterruptedException, MQBrokerException;
 }

@@ -40,10 +40,11 @@ public class DefaultMessageStoreShutDownTest {
 
     @Before
     public void init() throws Exception {
-        messageStore = spy(buildMessageStore());
-        boolean load = messageStore.load();
+        DefaultMessageStore store = buildMessageStore();
+        boolean load = store.load();
         assertTrue(load);
-        messageStore.start();
+        store.start();
+        messageStore = spy(store);
         when(messageStore.dispatchBehindBytes()).thenReturn(100L);
     }
 
@@ -64,12 +65,12 @@ public class DefaultMessageStoreShutDownTest {
 
     public DefaultMessageStore buildMessageStore() throws Exception {
         MessageStoreConfig messageStoreConfig = new MessageStoreConfig();
-        messageStoreConfig.setMapedFileSizeCommitLog(1024 * 1024 * 10);
-        messageStoreConfig.setMapedFileSizeConsumeQueue(1024 * 1024 * 10);
+        messageStoreConfig.setMappedFileSizeCommitLog(1024 * 1024 * 10);
+        messageStoreConfig.setMappedFileSizeConsumeQueue(1024 * 1024 * 10);
         messageStoreConfig.setMaxHashSlotNum(10000);
         messageStoreConfig.setMaxIndexNum(100 * 100);
         messageStoreConfig.setFlushDiskType(FlushDiskType.SYNC_FLUSH);
-        return new DefaultMessageStore(messageStoreConfig, new BrokerStatsManager("simpleTest"), null, new BrokerConfig());
+        return new DefaultMessageStore(messageStoreConfig, new BrokerStatsManager("simpleTest", true), null, new BrokerConfig());
     }
 
 

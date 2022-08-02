@@ -16,21 +16,33 @@
  */
 package org.apache.rocketmq.client;
 
-import org.apache.rocketmq.common.MixAll;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.common.UtilAll;
+import org.apache.rocketmq.common.message.MessageQueue;
+import org.apache.rocketmq.common.protocol.NamespaceUtil;
+import org.apache.rocketmq.common.utils.NameServerAddressUtils;
 import org.apache.rocketmq.remoting.common.RemotingUtil;
 import org.apache.rocketmq.remoting.netty.TlsSystemConfig;
 import org.apache.rocketmq.remoting.protocol.LanguageCode;
+import org.apache.rocketmq.remoting.protocol.RequestType;
 
 /**
  * Client Common configuration
  */
 public class ClientConfig {
     public static final String SEND_MESSAGE_WITH_VIP_CHANNEL_PROPERTY = "com.rocketmq.sendMessageWithVIPChannel";
-    private String namesrvAddr = System.getProperty(MixAll.NAMESRV_ADDR_PROPERTY, System.getenv(MixAll.NAMESRV_ADDR_ENV));
+    private String namesrvAddr = NameServerAddressUtils.getNameServerAddresses();
     private String clientIP = RemotingUtil.getLocalAddress();
     private String instanceName = System.getProperty("rocketmq.client.name", "DEFAULT");
     private int clientCallbackExecutorThreads = Runtime.getRuntime().availableProcessors();
+    protected String namespace;
+    private boolean namespaceInitialized = false;
+    protected AccessChannel accessChannel = AccessChannel.LOCAL;
+
     /**
      * Pulling topic information interval from the named server
      */
@@ -43,13 +55,22 @@ public class ClientConfig {
      * Offset persistent interval for consumer
      */
     private int persistConsumerOffsetInterval = 1000 * 5;
+    private long pullTimeDelayMillsWhenException = 1000;
     private boolean unitMode = false;
     private String unitName;
-    private boolean vipChannelEnabled = Boolean.parseBoolean(System.getProperty(SEND_MESSAGE_WITH_VIP_CHANNEL_PROPERTY, "true"));
+    private boolean vipChannelEnabled = Boolean.parseBoolean(System.getProperty(SEND_MESSAGE_WITH_VIP_CHANNEL_PROPERTY, "false"));
 
     private boolean useTLS = TlsSystemConfig.tlsEnable;
 
+    private int mqClientApiTimeout = 3 * 1000;
+
     private LanguageCode language = LanguageCode.JAVA;
+
+    /**
+     * Enable stream request type will inject a RPCHook to add corresponding request type to remoting layer.
+     * And it will also generate a different client id to prevent unexpected reuses of MQClientInstance.
+     */
+    protected boolean enableStreamRequestType = false;
 
     public String buildMQClientId() {
         StringBuilder sb = new StringBuilder();
@@ -60,6 +81,11 @@ public class ClientConfig {
         if (!UtilAll.isBlank(this.unitName)) {
             sb.append("@");
             sb.append(this.unitName);
+        }
+
+        if (enableStreamRequestType) {
+            sb.append("@");
+            sb.append(RequestType.STREAM);
         }
 
         return sb.toString();
@@ -83,8 +109,51 @@ public class ClientConfig {
 
     public void changeInstanceNameToPID() {
         if (this.instanceName.equals("DEFAULT")) {
-            this.instanceName = String.valueOf(UtilAll.getPid());
+            this.instanceName = UtilAll.getPid() + "#" + System.nanoTime();
         }
+    }
+
+    public String withNamespace(String resource) {
+        return NamespaceUtil.wrapNamespace(this.getNamespace(), resource);
+    }
+
+    public Set<String> withNamespace(Set<String> resourceSet) {
+        Set<String> resourceWithNamespace = new HashSet<String>();
+        for (String resource : resourceSet) {
+            resourceWithNamespace.add(withNamespace(resource));
+        }
+        return resourceWithNamespace;
+    }
+
+    public String withoutNamespace(String resource) {
+        return NamespaceUtil.withoutNamespace(resource, this.getNamespace());
+    }
+
+    public Set<String> withoutNamespace(Set<String> resourceSet) {
+        Set<String> resourceWithoutNamespace = new HashSet<String>();
+        for (String resource : resourceSet) {
+            resourceWithoutNamespace.add(withoutNamespace(resource));
+        }
+        return resourceWithoutNamespace;
+    }
+
+    public MessageQueue queueWithNamespace(MessageQueue queue) {
+        if (StringUtils.isEmpty(this.getNamespace())) {
+            return queue;
+        }
+        return new MessageQueue(withNamespace(queue.getTopic()), queue.getBrokerName(), queue.getQueueId());
+    }
+
+    public Collection<MessageQueue> queuesWithNamespace(Collection<MessageQueue> queues) {
+        if (StringUtils.isEmpty(this.getNamespace())) {
+            return queues;
+        }
+        Iterator<MessageQueue> iter = queues.iterator();
+        while (iter.hasNext()) {
+            MessageQueue queue = iter.next();
+            queue.setTopic(withNamespace(queue.getTopic()));
+        }
+        return queues;
     }
 
     public void resetClientConfig(final ClientConfig cc) {
@@ -95,11 +164,15 @@ public class ClientConfig {
         this.pollNameServerInterval = cc.pollNameServerInterval;
         this.heartbeatBrokerInterval = cc.heartbeatBrokerInterval;
         this.persistConsumerOffsetInterval = cc.persistConsumerOffsetInterval;
+        this.pullTimeDelayMillsWhenException = cc.pullTimeDelayMillsWhenException;
         this.unitMode = cc.unitMode;
         this.unitName = cc.unitName;
         this.vipChannelEnabled = cc.vipChannelEnabled;
         this.useTLS = cc.useTLS;
+        this.namespace = cc.namespace;
         this.language = cc.language;
+        this.mqClientApiTimeout = cc.mqClientApiTimeout;
+        this.enableStreamRequestType = cc.enableStreamRequestType;
     }
 
     public ClientConfig cloneClientConfig() {
@@ -111,20 +184,33 @@ public class ClientConfig {
         cc.pollNameServerInterval = pollNameServerInterval;
         cc.heartbeatBrokerInterval = heartbeatBrokerInterval;
         cc.persistConsumerOffsetInterval = persistConsumerOffsetInterval;
+        cc.pullTimeDelayMillsWhenException = pullTimeDelayMillsWhenException;
         cc.unitMode = unitMode;
         cc.unitName = unitName;
         cc.vipChannelEnabled = vipChannelEnabled;
         cc.useTLS = useTLS;
+        cc.namespace = namespace;
         cc.language = language;
+        cc.mqClientApiTimeout = mqClientApiTimeout;
+        cc.enableStreamRequestType = enableStreamRequestType;
         return cc;
     }
 
     public String getNamesrvAddr() {
+        if (StringUtils.isNotEmpty(namesrvAddr) && NameServerAddressUtils.NAMESRV_ENDPOINT_PATTERN.matcher(namesrvAddr.trim()).matches()) {
+            return NameServerAddressUtils.getNameSrvAddrFromNamesrvEndpoint(namesrvAddr);
+        }
         return namesrvAddr;
     }
 
+    /**
+     * Domain name mode access way does not support the delimiter(;), and only one domain name can be set.
+     *
+     * @param namesrvAddr name server address
+     */
     public void setNamesrvAddr(String namesrvAddr) {
         this.namesrvAddr = namesrvAddr;
+        this.namespaceInitialized = false;
     }
 
     public int getClientCallbackExecutorThreads() {
@@ -157,6 +243,14 @@ public class ClientConfig {
 
     public void setPersistConsumerOffsetInterval(int persistConsumerOffsetInterval) {
         this.persistConsumerOffsetInterval = persistConsumerOffsetInterval;
+    }
+
+    public long getPullTimeDelayMillsWhenException() {
+        return pullTimeDelayMillsWhenException;
+    }
+
+    public void setPullTimeDelayMillsWhenException(long pullTimeDelayMillsWhenException) {
+        this.pullTimeDelayMillsWhenException = pullTimeDelayMillsWhenException;
     }
 
     public String getUnitName() {
@@ -199,12 +293,60 @@ public class ClientConfig {
         this.language = language;
     }
 
+    public String getNamespace() {
+        if (namespaceInitialized) {
+            return namespace;
+        }
+
+        if (StringUtils.isNotEmpty(namespace)) {
+            return namespace;
+        }
+
+        if (StringUtils.isNotEmpty(this.namesrvAddr)) {
+            if (NameServerAddressUtils.validateInstanceEndpoint(namesrvAddr)) {
+                namespace = NameServerAddressUtils.parseInstanceIdFromEndpoint(namesrvAddr);
+            }
+        }
+        namespaceInitialized = true;
+        return namespace;
+    }
+
+    public void setNamespace(String namespace) {
+        this.namespace = namespace;
+        this.namespaceInitialized = true;
+    }
+
+    public AccessChannel getAccessChannel() {
+        return this.accessChannel;
+    }
+
+    public void setAccessChannel(AccessChannel accessChannel) {
+        this.accessChannel = accessChannel;
+    }
+
+    public int getMqClientApiTimeout() {
+        return mqClientApiTimeout;
+    }
+
+    public void setMqClientApiTimeout(int mqClientApiTimeout) {
+        this.mqClientApiTimeout = mqClientApiTimeout;
+    }
+
+    public boolean isEnableStreamRequestType() {
+        return enableStreamRequestType;
+    }
+
+    public void setEnableStreamRequestType(boolean enableStreamRequestType) {
+        this.enableStreamRequestType = enableStreamRequestType;
+    }
+
     @Override
     public String toString() {
         return "ClientConfig [namesrvAddr=" + namesrvAddr + ", clientIP=" + clientIP + ", instanceName=" + instanceName
             + ", clientCallbackExecutorThreads=" + clientCallbackExecutorThreads + ", pollNameServerInterval=" + pollNameServerInterval
-            + ", heartbeatBrokerInterval=" + heartbeatBrokerInterval + ", persistConsumerOffsetInterval="
-            + persistConsumerOffsetInterval + ", unitMode=" + unitMode + ", unitName=" + unitName + ", vipChannelEnabled="
-            + vipChannelEnabled + ", useTLS=" + useTLS + ", language=" + language.name() + "]";
+            + ", heartbeatBrokerInterval=" + heartbeatBrokerInterval + ", persistConsumerOffsetInterval=" + persistConsumerOffsetInterval
+            + ", pullTimeDelayMillsWhenException=" + pullTimeDelayMillsWhenException + ", unitMode=" + unitMode + ", unitName=" + unitName + ", vipChannelEnabled="
+            + vipChannelEnabled + ", useTLS=" + useTLS + ", language=" + language.name() + ", namespace=" + namespace + ", mqClientApiTimeout=" + mqClientApiTimeout
+            + ", enableStreamRequestType=" + enableStreamRequestType + "]";
     }
 }

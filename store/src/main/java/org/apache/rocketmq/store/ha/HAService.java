@@ -25,7 +25,6 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
@@ -39,6 +38,8 @@ import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.common.RemotingUtil;
 import org.apache.rocketmq.store.CommitLog;
 import org.apache.rocketmq.store.DefaultMessageStore;
+import org.apache.rocketmq.store.PutMessageSpinLock;
+import org.apache.rocketmq.store.PutMessageStatus;
 
 public class HAService {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
@@ -253,16 +254,18 @@ public class HAService {
     class GroupTransferService extends ServiceThread {
 
         private final WaitNotifyObject notifyTransferObject = new WaitNotifyObject();
-        private volatile List<CommitLog.GroupCommitRequest> requestsWrite = new ArrayList<>();
-        private volatile List<CommitLog.GroupCommitRequest> requestsRead = new ArrayList<>();
+        private final PutMessageSpinLock lock = new PutMessageSpinLock();
+        private volatile LinkedList<CommitLog.GroupCommitRequest> requestsWrite = new LinkedList<>();
+        private volatile LinkedList<CommitLog.GroupCommitRequest> requestsRead = new LinkedList<>();
 
-        public synchronized void putRequest(final CommitLog.GroupCommitRequest request) {
-            synchronized (this.requestsWrite) {
+        public void putRequest(final CommitLog.GroupCommitRequest request) {
+            lock.lock();
+            try {
                 this.requestsWrite.add(request);
+            } finally {
+                lock.unlock();
             }
-            if (hasNotified.compareAndSet(false, true)) {
-                waitPoint.countDown(); // notify
-            }
+            this.wakeup();
         }
 
         public void notifyTransferSome() {
@@ -270,30 +273,30 @@ public class HAService {
         }
 
         private void swapRequests() {
-            List<CommitLog.GroupCommitRequest> tmp = this.requestsWrite;
-            this.requestsWrite = this.requestsRead;
-            this.requestsRead = tmp;
+            lock.lock();
+            try {
+                LinkedList<CommitLog.GroupCommitRequest> tmp = this.requestsWrite;
+                this.requestsWrite = this.requestsRead;
+                this.requestsRead = tmp;
+            } finally {
+                lock.unlock();
+            }
         }
 
         private void doWaitTransfer() {
-            synchronized (this.requestsRead) {
-                if (!this.requestsRead.isEmpty()) {
-                    for (CommitLog.GroupCommitRequest req : this.requestsRead) {
-                        boolean transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
-                        for (int i = 0; !transferOK && i < 5; i++) {
-                            this.notifyTransferObject.waitForRunning(1000);
-                            transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
-                        }
-
-                        if (!transferOK) {
-                            log.warn("transfer messsage to slave timeout, " + req.getNextOffset());
-                        }
-
-                        req.wakeupCustomer(transferOK);
+            if (!this.requestsRead.isEmpty()) {
+                for (CommitLog.GroupCommitRequest req : this.requestsRead) {
+                    boolean transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
+                    long deadLine = req.getDeadLine();
+                    while (!transferOK && deadLine - System.nanoTime() > 0) {
+                        this.notifyTransferObject.waitForRunning(1000);
+                        transferOK = HAService.this.push2SlaveMaxOffset.get() >= req.getNextOffset();
                     }
 
-                    this.requestsRead.clear();
+                    req.wakeupCustomer(transferOK ? PutMessageStatus.PUT_OK : PutMessageStatus.FLUSH_SLAVE_TIMEOUT);
                 }
+
+                this.requestsRead = new LinkedList<>();
             }
         }
 
@@ -327,12 +330,12 @@ public class HAService {
         private static final int READ_MAX_BUFFER_SIZE = 1024 * 1024 * 4;
         private final AtomicReference<String> masterAddress = new AtomicReference<>();
         private final ByteBuffer reportOffset = ByteBuffer.allocate(8);
+        private final Selector selector;
         private SocketChannel socketChannel;
-        private Selector selector;
         private long lastWriteTimestamp = System.currentTimeMillis();
 
         private long currentReportedOffset = 0;
-        private int dispatchPostion = 0;
+        private int dispatchPosition = 0;
         private ByteBuffer byteBufferRead = ByteBuffer.allocate(READ_MAX_BUFFER_SIZE);
         private ByteBuffer byteBufferBackup = ByteBuffer.allocate(READ_MAX_BUFFER_SIZE);
 
@@ -351,10 +354,9 @@ public class HAService {
         private boolean isTimeToReportOffset() {
             long interval =
                 HAService.this.defaultMessageStore.getSystemClock().now() - this.lastWriteTimestamp;
-            boolean needHeart = interval > HAService.this.defaultMessageStore.getMessageStoreConfig()
-                .getHaSendHeartbeatInterval();
 
-            return needHeart;
+            return interval > HAService.this.defaultMessageStore.getMessageStoreConfig()
+                .getHaSendHeartbeatInterval();
         }
 
         private boolean reportSlaveMaxOffset(final long maxOffset) {
@@ -374,13 +376,14 @@ public class HAService {
                 }
             }
 
+            lastWriteTimestamp = HAService.this.defaultMessageStore.getSystemClock().now();
             return !this.reportOffset.hasRemaining();
         }
 
         private void reallocateByteBuffer() {
-            int remain = READ_MAX_BUFFER_SIZE - this.dispatchPostion;
+            int remain = READ_MAX_BUFFER_SIZE - this.dispatchPosition;
             if (remain > 0) {
-                this.byteBufferRead.position(this.dispatchPostion);
+                this.byteBufferRead.position(this.dispatchPosition);
 
                 this.byteBufferBackup.position(0);
                 this.byteBufferBackup.limit(READ_MAX_BUFFER_SIZE);
@@ -391,7 +394,7 @@ public class HAService {
 
             this.byteBufferRead.position(remain);
             this.byteBufferRead.limit(READ_MAX_BUFFER_SIZE);
-            this.dispatchPostion = 0;
+            this.dispatchPosition = 0;
         }
 
         private void swapByteBuffer() {
@@ -406,7 +409,6 @@ public class HAService {
                 try {
                     int readSize = this.socketChannel.read(this.byteBufferRead);
                     if (readSize > 0) {
-                        lastWriteTimestamp = HAService.this.defaultMessageStore.getSystemClock().now();
                         readSizeZeroTimes = 0;
                         boolean result = this.dispatchReadRequest();
                         if (!result) {
@@ -432,13 +434,12 @@ public class HAService {
 
         private boolean dispatchReadRequest() {
             final int msgHeaderSize = 8 + 4; // phyoffset + size
-            int readSocketPos = this.byteBufferRead.position();
 
             while (true) {
-                int diff = this.byteBufferRead.position() - this.dispatchPostion;
+                int diff = this.byteBufferRead.position() - this.dispatchPosition;
                 if (diff >= msgHeaderSize) {
-                    long masterPhyOffset = this.byteBufferRead.getLong(this.dispatchPostion);
-                    int bodySize = this.byteBufferRead.getInt(this.dispatchPostion + 8);
+                    long masterPhyOffset = this.byteBufferRead.getLong(this.dispatchPosition);
+                    int bodySize = this.byteBufferRead.getInt(this.dispatchPosition + 8);
 
                     long slavePhyOffset = HAService.this.defaultMessageStore.getMaxPhyOffset();
 
@@ -451,14 +452,13 @@ public class HAService {
                     }
 
                     if (diff >= (msgHeaderSize + bodySize)) {
-                        byte[] bodyData = new byte[bodySize];
-                        this.byteBufferRead.position(this.dispatchPostion + msgHeaderSize);
-                        this.byteBufferRead.get(bodyData);
+                        byte[] bodyData = byteBufferRead.array();
+                        int dataStart = this.dispatchPosition + msgHeaderSize;
 
-                        HAService.this.defaultMessageStore.appendToCommitLog(masterPhyOffset, bodyData);
+                        HAService.this.defaultMessageStore.appendToCommitLog(
+                                masterPhyOffset, bodyData, dataStart, bodySize);
 
-                        this.byteBufferRead.position(readSocketPos);
-                        this.dispatchPostion += msgHeaderSize + bodySize;
+                        this.dispatchPosition += msgHeaderSize + bodySize;
 
                         if (!reportSlaveMaxOffsetPlus()) {
                             return false;
@@ -532,7 +532,7 @@ public class HAService {
                 }
 
                 this.lastWriteTimestamp = 0;
-                this.dispatchPostion = 0;
+                this.dispatchPosition = 0;
 
                 this.byteBufferBackup.position(0);
                 this.byteBufferBackup.limit(READ_MAX_BUFFER_SIZE);
@@ -554,6 +554,7 @@ public class HAService {
                             boolean result = this.reportSlaveMaxOffset(this.currentReportedOffset);
                             if (!result) {
                                 this.closeMaster();
+                                continue;
                             }
                         }
 
@@ -562,6 +563,7 @@ public class HAService {
                         boolean ok = this.processReadEvent();
                         if (!ok) {
                             this.closeMaster();
+                            continue;
                         }
 
                         if (!reportSlaveMaxOffsetPlus()) {
@@ -589,6 +591,13 @@ public class HAService {
 
             log.info(this.getServiceName() + " service end");
         }
+
+        @Override
+        public void shutdown() {
+            super.shutdown();
+            closeMaster();
+        }
+
         // private void disableWriteFlag() {
         // if (this.socketChannel != null) {
         // SelectionKey sk = this.socketChannel.keyFor(this.selector);

@@ -122,8 +122,8 @@ public class MessageStoreWithFilterTest {
     public MessageStoreConfig buildStoreConfig(int commitLogFileSize, int cqFileSize,
                                                boolean enableCqExt, int cqExtFileSize) {
         MessageStoreConfig messageStoreConfig = new MessageStoreConfig();
-        messageStoreConfig.setMapedFileSizeCommitLog(commitLogFileSize);
-        messageStoreConfig.setMapedFileSizeConsumeQueue(cqFileSize);
+        messageStoreConfig.setMappedFileSizeCommitLog(commitLogFileSize);
+        messageStoreConfig.setMappedFileSizeConsumeQueue(cqFileSize);
         messageStoreConfig.setMappedFileSizeConsumeQueueExt(cqExtFileSize);
         messageStoreConfig.setMessageIndexEnable(false);
         messageStoreConfig.setEnableConsumeQueueExt(enableCqExt);
@@ -146,7 +146,7 @@ public class MessageStoreWithFilterTest {
 
         DefaultMessageStore master = new DefaultMessageStore(
             messageStoreConfig,
-            new BrokerStatsManager(brokerConfig.getBrokerClusterName()),
+            new BrokerStatsManager(brokerConfig.getBrokerClusterName(), brokerConfig.isEnableDetailStat()),
             new MessageArrivingListener() {
                 @Override
                 public void arriving(String topic, int queueId, long logicOffset, long tagsCode,

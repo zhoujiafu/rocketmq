@@ -1,8 +1,10 @@
-# Installation Guides
+# Deployment Architectures and Setup Steps
+
+## Cluster Setup
 
 ### 1 Single Master mode
 
-This is the simplest but also the riskiest mode, that makes the entire service unavailable once the broker restarts or goes down. Production environments are not recommended, but can be used for local testing and development. Here are the steps to build.
+This is the simplest, but also the riskiest mode, that makes the entire service unavailable once the broker restarts or goes down. Production environments are not recommended, but can be used for local testing and development. Here are the steps to build.
 
 **1）Start NameServer**
 
@@ -67,11 +69,11 @@ $ nohup sh mqbroker -n 192.168.1.1:9876 -c $ROCKETMQ_HOME/conf/2m-noslave/broker
 ...
 ```
 
-The boot command shown above is used in the case of a single NameServer. For clusters of multiple NameServer, the address list after the -n argument in the broker boot command is separated by semicolons, for example, 192.168.1.1: 9876;192.161.2: 9876.
+The boot command shown above is used in the case of a single NameServer.For clusters of multiple NameServer, the address list after the -n argument in the broker boot command is separated by semicolons, for example, 192.168.1.1: 9876;192.161.2: 9876.
 
 ### 3 Multiple Master And Multiple Slave Mode-Asynchronous replication
 
-Each master node configures more thran one slave nodes, with multiple pairs of master-slave.HA uses asynchronous replication, with a short message delay (millisecond) between master node and slave node.The advantages and disadvantages of this mode are as follows:
+Each master node configures more than one slave nodes, with multiple pairs of master-slave.HA uses asynchronous replication, with a short message delay (millisecond) between master node and slave node.The advantages and disadvantages of this mode are as follows:
 
 - Advantages: 
   1. Even if the disk is corrupted, very few messages will be lost and the real-time performance of the message will not be affected.

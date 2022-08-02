@@ -26,6 +26,7 @@ import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.common.RemotingUtil;
+import org.apache.rocketmq.remoting.netty.NettySystemConfig;
 import org.apache.rocketmq.store.SelectMappedBufferResult;
 
 public class HAConnection {
@@ -33,8 +34,8 @@ public class HAConnection {
     private final HAService haService;
     private final SocketChannel socketChannel;
     private final String clientAddr;
-    private WriteSocketService writeSocketService;
-    private ReadSocketService readSocketService;
+    private final WriteSocketService writeSocketService;
+    private final ReadSocketService readSocketService;
 
     private volatile long slaveRequestOffset = -1;
     private volatile long slaveAckOffset = -1;
@@ -46,8 +47,12 @@ public class HAConnection {
         this.socketChannel.configureBlocking(false);
         this.socketChannel.socket().setSoLinger(false, -1);
         this.socketChannel.socket().setTcpNoDelay(true);
-        this.socketChannel.socket().setReceiveBufferSize(1024 * 64);
-        this.socketChannel.socket().setSendBufferSize(1024 * 64);
+        if (NettySystemConfig.socketSndbufSize > 0) {
+            this.socketChannel.socket().setReceiveBufferSize(NettySystemConfig.socketSndbufSize);
+        }
+        if (NettySystemConfig.socketRcvbufSize > 0) {
+            this.socketChannel.socket().setSendBufferSize(NettySystemConfig.socketRcvbufSize);
+        }
         this.writeSocketService = new WriteSocketService(this.socketChannel);
         this.readSocketService = new ReadSocketService(this.socketChannel);
         this.haService.getConnectionCount().incrementAndGet();
@@ -78,12 +83,28 @@ public class HAConnection {
         return socketChannel;
     }
 
+    private void stopChannelAndSelector(SocketChannel channel, Selector selector, String serviceName) {
+        SelectionKey sk = channel.keyFor(selector);
+        if (sk != null) {
+            sk.cancel();
+        }
+
+        try {
+            selector.close();
+            channel.close();
+        } catch (IOException e) {
+            log.error("", e);
+        }
+
+        log.info(serviceName + " service end");
+    }
+
     class ReadSocketService extends ServiceThread {
         private static final int READ_MAX_BUFFER_SIZE = 1024 * 1024;
         private final Selector selector;
         private final SocketChannel socketChannel;
         private final ByteBuffer byteBufferRead = ByteBuffer.allocate(READ_MAX_BUFFER_SIZE);
-        private int processPostion = 0;
+        private int processPosition = 0;
         private volatile long lastReadTimestamp = System.currentTimeMillis();
 
         public ReadSocketService(final SocketChannel socketChannel) throws IOException {
@@ -125,19 +146,7 @@ public class HAConnection {
 
             HAConnection.this.haService.getConnectionCount().decrementAndGet();
 
-            SelectionKey sk = this.socketChannel.keyFor(this.selector);
-            if (sk != null) {
-                sk.cancel();
-            }
-
-            try {
-                this.selector.close();
-                this.socketChannel.close();
-            } catch (IOException e) {
-                HAConnection.log.error("", e);
-            }
-
-            HAConnection.log.info(this.getServiceName() + " service end");
+            HAConnection.this.stopChannelAndSelector(this.socketChannel, this.selector, this.getServiceName());
         }
 
         @Override
@@ -150,7 +159,7 @@ public class HAConnection {
 
             if (!this.byteBufferRead.hasRemaining()) {
                 this.byteBufferRead.flip();
-                this.processPostion = 0;
+                this.processPosition = 0;
             }
 
             while (this.byteBufferRead.hasRemaining()) {
@@ -159,15 +168,21 @@ public class HAConnection {
                     if (readSize > 0) {
                         readSizeZeroTimes = 0;
                         this.lastReadTimestamp = HAConnection.this.haService.getDefaultMessageStore().getSystemClock().now();
-                        if ((this.byteBufferRead.position() - this.processPostion) >= 8) {
+                        if ((this.byteBufferRead.position() - this.processPosition) >= 8) {
                             int pos = this.byteBufferRead.position() - (this.byteBufferRead.position() % 8);
                             long readOffset = this.byteBufferRead.getLong(pos - 8);
-                            this.processPostion = pos;
+                            this.processPosition = pos;
 
                             HAConnection.this.slaveAckOffset = readOffset;
                             if (HAConnection.this.slaveRequestOffset < 0) {
                                 HAConnection.this.slaveRequestOffset = readOffset;
                                 log.info("slave[" + HAConnection.this.clientAddr + "] request offset " + readOffset);
+                            } else if (HAConnection.this.slaveAckOffset > HAConnection.this.haService.getDefaultMessageStore().getMaxPhyOffset()) {
+                                log.warn("slave[{}] request offset={} greater than local commitLog offset={}. ",
+                                        HAConnection.this.clientAddr,
+                                        HAConnection.this.slaveAckOffset,
+                                        HAConnection.this.haService.getDefaultMessageStore().getMaxPhyOffset());
+                                return false;
                             }
 
                             HAConnection.this.haService.notifyTransferSome(HAConnection.this.slaveAckOffset);
@@ -227,7 +242,7 @@ public class HAConnection {
                             masterOffset =
                                 masterOffset
                                     - (masterOffset % HAConnection.this.haService.getDefaultMessageStore().getMessageStoreConfig()
-                                    .getMapedFileSizeCommitLog());
+                                    .getMappedFileSizeCommitLog());
 
                             if (masterOffset < 0) {
                                 masterOffset = 0;
@@ -312,19 +327,7 @@ public class HAConnection {
 
             haService.removeConnection(HAConnection.this);
 
-            SelectionKey sk = this.socketChannel.keyFor(this.selector);
-            if (sk != null) {
-                sk.cancel();
-            }
-
-            try {
-                this.selector.close();
-                this.socketChannel.close();
-            } catch (IOException e) {
-                HAConnection.log.error("", e);
-            }
-
-            HAConnection.log.info(this.getServiceName() + " service end");
+            HAConnection.this.stopChannelAndSelector(this.socketChannel, this.selector, this.getServiceName());
         }
 
         private boolean transferData() throws Exception {

@@ -16,24 +16,13 @@
  */
 package org.apache.rocketmq.tools.admin;
 
-import java.io.UnsupportedEncodingException;
-import java.lang.reflect.Field;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-import java.util.concurrent.ConcurrentHashMap;
 import org.apache.rocketmq.client.ClientConfig;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.client.impl.MQClientAPIImpl;
 import org.apache.rocketmq.client.impl.MQClientManager;
 import org.apache.rocketmq.client.impl.factory.MQClientInstance;
+import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.admin.ConsumeStats;
 import org.apache.rocketmq.common.admin.OffsetWrapper;
 import org.apache.rocketmq.common.admin.TopicOffset;
@@ -52,8 +41,11 @@ import org.apache.rocketmq.common.protocol.body.GroupList;
 import org.apache.rocketmq.common.protocol.body.KVTable;
 import org.apache.rocketmq.common.protocol.body.ProcessQueueInfo;
 import org.apache.rocketmq.common.protocol.body.ProducerConnection;
+import org.apache.rocketmq.common.protocol.body.ProducerInfo;
+import org.apache.rocketmq.common.protocol.body.ProducerTableInfo;
 import org.apache.rocketmq.common.protocol.body.QueueTimeSpan;
 import org.apache.rocketmq.common.protocol.body.SubscriptionGroupWrapper;
+import org.apache.rocketmq.common.protocol.body.TopicConfigSerializeWrapper;
 import org.apache.rocketmq.common.protocol.body.TopicList;
 import org.apache.rocketmq.common.protocol.heartbeat.ConsumeType;
 import org.apache.rocketmq.common.protocol.heartbeat.MessageModel;
@@ -67,12 +59,27 @@ import org.apache.rocketmq.remoting.exception.RemotingConnectException;
 import org.apache.rocketmq.remoting.exception.RemotingException;
 import org.apache.rocketmq.remoting.exception.RemotingSendRequestException;
 import org.apache.rocketmq.remoting.exception.RemotingTimeoutException;
+import org.apache.rocketmq.remoting.protocol.LanguageCode;
 import org.apache.rocketmq.tools.admin.api.MessageTrack;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
+
+import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -85,7 +92,7 @@ import static org.mockito.Mockito.when;
 public class DefaultMQAdminExtTest {
     private static DefaultMQAdminExt defaultMQAdminExt;
     private static DefaultMQAdminExtImpl defaultMQAdminExtImpl;
-    private static MQClientInstance mqClientInstance = MQClientManager.getInstance().getAndCreateMQClientInstance(new ClientConfig());
+    private static MQClientInstance mqClientInstance = MQClientManager.getInstance().getOrCreateMQClientInstance(new ClientConfig());
     private static MQClientAPIImpl mQClientAPIImpl;
     private static Properties properties = new Properties();
     private static TopicList topicList = new TopicList();
@@ -208,7 +215,19 @@ public class DefaultMQAdminExtTest {
         producerConnection.setConnectionSet(connectionSet);
         when(mQClientAPIImpl.getProducerConnectionList(anyString(), anyString(), anyLong())).thenReturn(producerConnection);
 
+        ProducerTableInfo producerTableInfo = new ProducerTableInfo(new HashMap<>());
+        producerTableInfo.getData().put("test-producer-group", Arrays.asList(new ProducerInfo(
+                "xxxx-client-id",
+                "127.0.0.1:18978",
+                LanguageCode.JAVA,
+                400,
+                System.currentTimeMillis()
+
+        )));
+        when(mQClientAPIImpl.getAllProducerInfo(anyString(), anyLong())).thenReturn(producerTableInfo);
+
         when(mQClientAPIImpl.wipeWritePermOfBroker(anyString(), anyString(), anyLong())).thenReturn(6);
+        when(mQClientAPIImpl.addWritePermOfBroker(anyString(), anyString(), anyLong())).thenReturn(7);
 
         TopicStatsTable topicStatsTable = new TopicStatsTable();
         topicStatsTable.setOffsetTable(new HashMap<MessageQueue, TopicOffset>());
@@ -225,6 +244,14 @@ public class DefaultMQAdminExtTest {
         consumerRunningInfo.setStatusTable(new TreeMap<String, ConsumeStatus>());
         consumerRunningInfo.setSubscriptionSet(new TreeSet<SubscriptionData>());
         when(mQClientAPIImpl.getConsumerRunningInfo(anyString(), anyString(), anyString(), anyBoolean(), anyLong())).thenReturn(consumerRunningInfo);
+
+        TopicConfigSerializeWrapper topicConfigSerializeWrapper = new TopicConfigSerializeWrapper();
+        topicConfigSerializeWrapper.setTopicConfigTable(new ConcurrentHashMap<String, TopicConfig>() {
+            {
+                put("topic_test_examine_topicConfig", new TopicConfig("topic_test_examine_topicConfig"));
+            }
+        });
+        when(mQClientAPIImpl.getAllTopicConfig(anyString(),anyLong())).thenReturn(topicConfigSerializeWrapper);
     }
 
     @AfterClass
@@ -285,6 +312,10 @@ public class DefaultMQAdminExtTest {
         ConsumerConnection consumerConnection = defaultMQAdminExt.examineConsumerConnectionInfo("default-consumer-group");
         assertThat(consumerConnection.getConsumeType()).isEqualTo(ConsumeType.CONSUME_PASSIVELY);
         assertThat(consumerConnection.getMessageModel()).isEqualTo(MessageModel.CLUSTERING);
+
+        consumerConnection = defaultMQAdminExt.examineConsumerConnectionInfo("default-consumer-group", "127.0.0.1:10911");
+        assertThat(consumerConnection.getConsumeType()).isEqualTo(ConsumeType.CONSUME_PASSIVELY);
+        assertThat(consumerConnection.getMessageModel()).isEqualTo(MessageModel.CLUSTERING);
     }
 
     @Test
@@ -294,9 +325,22 @@ public class DefaultMQAdminExtTest {
     }
 
     @Test
+    public void testGetAllProducerInfo() throws InterruptedException, RemotingException, MQClientException, MQBrokerException {
+        ProducerTableInfo producerTableInfo = defaultMQAdminExt.getAllProducerInfo("127.0.0.1:10911");
+        assertThat(producerTableInfo.getData().size()).isEqualTo(1);
+    }
+
+
+    @Test
     public void testWipeWritePermOfBroker() throws InterruptedException, RemotingCommandException, RemotingSendRequestException, RemotingTimeoutException, MQClientException, RemotingConnectException {
         int result = defaultMQAdminExt.wipeWritePermOfBroker("127.0.0.1:9876", "default-broker");
         assertThat(result).isEqualTo(6);
+    }
+
+    @Test
+    public void testAddWritePermOfBroker() throws InterruptedException, RemotingCommandException, RemotingSendRequestException, RemotingTimeoutException, MQClientException, RemotingConnectException {
+        int result = defaultMQAdminExt.addWritePermOfBroker("127.0.0.1:9876", "default-broker");
+        assertThat(result).isEqualTo(7);
     }
 
     @Test
@@ -405,5 +449,11 @@ public class DefaultMQAdminExtTest {
         assertThat(subscriptionGroupWrapper.getSubscriptionGroupTable().get("Consumer-group-one").getBrokerId()).isEqualTo(1234);
         assertThat(subscriptionGroupWrapper.getSubscriptionGroupTable().get("Consumer-group-one").getGroupName()).isEqualTo("Consumer-group-one");
         assertThat(subscriptionGroupWrapper.getSubscriptionGroupTable().get("Consumer-group-one").isConsumeBroadcastEnable()).isTrue();
+    }
+
+    @Test
+    public void testExamineTopicConfig() throws MQBrokerException, RemotingException, InterruptedException {
+        TopicConfig topicConfig = defaultMQAdminExt.examineTopicConfig("127.0.0.1:10911", "topic_test_examine_topicConfig");
+        assertThat(topicConfig.getTopicName().equals("topic_test_examine_topicConfig"));
     }
 }
